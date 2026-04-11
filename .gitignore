@@ -30,3 +30,6 @@ output/
 
 # 其他
 mmchi/
+
+
+*.ipynb
