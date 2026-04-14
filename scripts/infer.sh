@@ -15,13 +15,13 @@ python inference_location_square.py \
 --test_dir /mnt/disk1/aiotlab/hachi/data/Location_squared/Turn_1 \
 --version training-based \
 --exam_size 224 \
---work_dir /mnt/disk1/aiotlab/hachi/Output/Location_squared/Turn_1/Unicombine
+--work_dir /mnt/disk1/aiotlab/hachi/Output/Location_squared/Turn_1/tmp
 
-python inference_location_square.py \
---condition_types subject fill \
---denoising_lora_name subject_fill_union \
---denoising_lora_weight 1.0 \
---test_dir /mnt/disk1/aiotlab/hachi/data/Location_squared/Turn_1 \
---version training-based \
---exam_size 512 \
---work_dir /mnt/disk1/aiotlab/hachi/Output/Location_squared/Turn_1/Unicombine_512
+# python inference_location_square.py \
+# --condition_types subject fill \
+# --denoising_lora_name subject_fill_union \
+# --denoising_lora_weight 1.0 \
+# --test_dir /mnt/disk1/aiotlab/hachi/data/Location_squared/Turn_1 \
+# --version training-based \
+# --exam_size 512 \
+# --work_dir /mnt/disk1/aiotlab/hachi/Output/Location_squared/Turn_1/Unicombine_512

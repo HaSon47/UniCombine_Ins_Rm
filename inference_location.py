@@ -42,40 +42,6 @@ def parse_args(input_args=None):
 def convert_image(image):
     return image if isinstance(image, Image.Image) else Image.open(image)
 
-def get_inputs(test_dir, root_path="/mnt/disk1/aiotlab/hachi/data/OBJ_INS_FSC"):
-    print("get input")
-    inputs = []
-    img_folder_path = os.path.join(test_dir, "Image")
-    anno_bbox_folder_path = os.path.join(test_dir, "Anno")
-    for img in tqdm(os.listdir(img_folder_path)):
-        img_name = img.split(".")[0]
-        # get fill
-        img_path = os.path.join(img_folder_path, img)
-        anno_bbox_path = os.path.join(anno_bbox_folder_path, img.replace("png", "json"))
-        with open(anno_bbox_path, "r") as f:
-            anno_bbox = json.load(f)
-        prompt = f"a {anno_bbox["class"]}"
-        loc_bbox = anno_bbox["pred_box"]
-
-        #get subject
-        img_root_path = os.path.join(root_path, "test", img_name, "ground_truth.jpg")
-        anno_root_path =os.path.join(root_path, "test", img_name, "fixed_annotation.json")
-        if not os.path.exists(img_root_path):
-            img_root_path = os.path.join(root_path, "val", img_name, "ground_truth.jpg")
-            anno_root_path =os.path.join(root_path, "val", img_name, "fixed_annotation.json")
-        with open(anno_root_path, "r") as f:
-            anno_root = json.load(f)
-        exam_bbox = anno_root["inpainted_bboxes"][0]
-        exam_path = img_root_path
-        inputs.append([
-            img_name,
-            prompt,
-            img_path,
-            loc_bbox,
-            exam_path,
-            exam_bbox
-        ])
-    return inputs
 
 def get_inputs(test_dir, turn, root_path="/mnt/disk1/aiotlab/hachi/data/OBJ_INS_FSC"):
     print("get inputs")
@@ -124,65 +90,6 @@ def get_inputs(test_dir, turn, root_path="/mnt/disk1/aiotlab/hachi/data/OBJ_INS_
         ])
     return inputs
 
-
-# def get_background(bg_path, loc_bbox):
-#     """
-#     Crop vùng xung quanh loc_bbox với kích thước vuông max là 256
-#     """
-#     img = Image.open(bg_path).convert("RGB")
-#     img_w, img_h = img.size
-    
-#     x1, y1, x2, y2 = loc_bbox
-
-#     # Kích thước hình vuông cần crop
-#     crop_size = min(256, min(img_w, img_h))
-
-#     # Lấy tâm của loc_bbox
-#     cx = (x1 + x2) /2
-#     cy = (y1+y2)/2
-
-#     # Tính toán tọa độ crop ban đầu (đăt bbox vào giữa)
-#     crop_x1 = int(cx - crop_size/2)
-#     crop_y1 = int(cy - crop_size/2)
-#     crop_x2 = crop_x1 + crop_size
-#     crop_y2 = crop_y1 + crop_size
-
-#     # Dịch chuyển crop box nếu bị tràn ra ngoài biên ảnh
-#     # Giữ nguyên kích thước crop_size
-#     if crop_x1 < 0:
-#         crop_x2 -= crop_x1
-#         crop_x1 = 0
-#     if crop_y1 < 0:
-#         crop_y2 -= crop_y1
-#         crop_y1 = 0
-
-#     if crop_x2 > img_w:
-#         crop_x1 -= (crop_x2 - img_w)  # Dịch sang trái
-#         crop_x2 = img_w
-#     if crop_y2 > img_h:
-#         crop_y1 -= (crop_y2 - img_h)  # Dịch lên trên
-#         crop_y2 = img_h
-
-#     # Ép kiểu và clamp cẩn thận lại lần cuối
-#     crop_x1 = max(0, int(crop_x1))
-#     crop_y1 = max(0, int(crop_y1))
-#     crop_x2 = min(img_w, int(crop_x2))
-#     crop_y2 = min(img_h, int(crop_y2))
-
-#     crop_box = [crop_x1, crop_y1, crop_x2, crop_y2]
-    
-#     # Cắt ảnh background
-#     cropped_img = img.crop(crop_box)
-
-#     # Cập nhật tọa độ loc_bbox mới tương đối so với ảnh đã crop
-#     new_loc_bbox = [
-#         int(x1 - crop_x1),
-#         int(y1 - crop_y1),
-#         int(x2 - crop_x1),
-#         int(y2 - crop_y1)
-#     ]
-
-#     return img, cropped_img, new_loc_bbox, crop_box
     
 def get_background(bg_path, loc_bbox):
     """

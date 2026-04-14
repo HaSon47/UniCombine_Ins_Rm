@@ -128,6 +128,7 @@ def inference(args):
     for condition_type in args.condition_types:
         transformer.load_lora_adapter(f"{args.condition_lora_dir}/{condition_type}.safetensors", adapter_name=condition_type)
 
+    # import pdb; pdb.set_trace()
     pipe = UniCombinePipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         torch_dtype = weight_dtype,
