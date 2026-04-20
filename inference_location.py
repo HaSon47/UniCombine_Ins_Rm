@@ -64,7 +64,8 @@ def get_inputs(test_dir, turn, root_path="/mnt/disk1/aiotlab/hachi/data/OBJ_INS_
         # get fill
         img_path = os.path.join(img_test_path, file.replace(".json", ".png"))
         ## get prompt
-        prompt = f"a {anno_class["class"]}"
+        class_name = anno_class["class"]
+        prompt = f"add one more {class_name} ensuring intra-category coherence, matching the morphology, scale, and visual style of existing {class_name}s"
         ## get location bbox
         loc_bbox_path = os.path.join(anno_bbox_test_path, file)
         with open(loc_bbox_path, "r") as f:
@@ -167,6 +168,12 @@ def get_conditions(img_path, loc_bbox, exam_bbox, exam_size):
     conditions = []
     # subject
     subject = Image.open(img_path).convert("RGB").crop(exam_bbox)
+    # sub_w, sub_h = subject.size
+    # max_dim = max(sub_w, sub_h)
+    # square = Image.new("RGB", (max_dim, max_dim), (127, 127, 127))
+    # square.paste(subject, ((max_dim - sub_w) // 2, (max_dim - sub_h) // 2))
+
+    # subject = square.resize((exam_size,exam_size), Image.Resampling.LANCZOS)
     subject = subject.resize((exam_size,exam_size), Image.Resampling.LANCZOS)
     conditions.append(Condition("subject", raw_img=convert_image(subject)))
     # fill

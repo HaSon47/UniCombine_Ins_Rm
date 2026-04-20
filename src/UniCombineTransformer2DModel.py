@@ -9,7 +9,7 @@ from diffusers.models.transformers.transformer_flux import (
 )
 from diffusers.utils import unscale_lora_layers,is_torch_version,USE_PEFT_BACKEND,scale_lora_layers,logging
 from .lora_switching_module import enable_lora, module_active_adapters
-from .UniCombineTransformerBlock import block_forward,single_block_forward
+from .UniCombineTransformerBlock_sub_att_fill import block_forward,single_block_forward
 
 logger = logging.get_logger(__name__)
 class UniCombineTransformer2DModel(FluxTransformer2DModel):
