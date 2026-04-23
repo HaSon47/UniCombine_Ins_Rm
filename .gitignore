@@ -34,3 +34,5 @@ mmchi/
 
 *.ipynb
 *.env
+
+output*

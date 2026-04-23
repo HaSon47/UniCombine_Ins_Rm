@@ -1,6 +1,9 @@
 '''
 - chỉ finetune Denoising LoRA
+- có ImageLogger
+- có Tensorboard log
 '''
+print("run train_fsc_v2.py")
 import sys,os
 current_dir = os.path.dirname(__file__)
 sys.path.append(os.path.abspath(os.path.join(current_dir, '..')))
@@ -38,6 +41,9 @@ if is_wandb_available():
     pass
 from src.text_encoder import encode_prompt
 from datetime import datetime
+import torchvision
+import numpy as np
+from PIL import Image
 
 check_min_version("0.32.0.dev0")
 logger = get_logger(__name__, log_level="INFO")
@@ -62,6 +68,107 @@ def encode_images(pixels: torch.Tensor, vae: torch.nn.Module, weight_dtype):
     pixel_latents = vae.encode(pixels.to(vae.dtype)).latent_dist.sample()
     pixel_latents = (pixel_latents - vae.config.shift_factor) * vae.config.scaling_factor
     return pixel_latents.to(weight_dtype)
+
+def decode_latents(latents: torch.Tensor, vae: torch.nn.Module) -> torch.Tensor:
+    """Decode VAE latents to pixel images in [-1, 1] range."""
+    latents = latents / vae.config.scaling_factor + vae.config.shift_factor
+    images = vae.decode(latents.to(vae.dtype)).sample
+    return images.float().clamp(-1., 1.)
+
+
+class ImageLogger:
+    """
+    Saves decoded sample images to disk during training at a fixed step interval.
+    Adapted from the PyTorch Lightning ImageLogger in main.py for use with Accelerate.
+
+    At every `log_every_n_steps` global steps (on the main process only) it saves a PNG
+    grid to <work_dir>/images/gs-{step:06d}.png with columns:
+        [condition_0, condition_1, ..., ground-truth target, model prediction (x0)]
+
+    The model prediction is recovered from the velocity output via:
+        x0_pred = noisy_input - sigma * model_pred_velocity
+    and then decoded through the VAE back to pixel space.
+    """
+
+    def __init__(self, work_dir: str, log_every_n_steps: int = 500, max_images: int = 4):
+        self.image_dir = os.path.join(work_dir, "images")
+        os.makedirs(self.image_dir, exist_ok=True)
+        self.log_every_n_steps = log_every_n_steps
+        self.max_images = max_images
+
+    def should_log(self, global_step: int) -> bool:
+        return self.log_every_n_steps > 0 and global_step % self.log_every_n_steps == 0
+
+    @torch.no_grad()
+    def log(
+        self,
+        global_step: int,
+        batch: dict,
+        vae: torch.nn.Module,
+        weight_dtype,
+        # --- prediction inputs ---
+        model_pred: torch.Tensor,       # velocity pred [B, C, H, W], unpacked
+        noisy_model_input: torch.Tensor,# noisy latent  [B, C, H, W]
+        sigmas: torch.Tensor,           # sigmas used for this batch [B,1,1,1]
+    ):
+        """
+        Build and save a grid with columns:
+            condition images... | ground-truth | x0 prediction
+        Each row is one sample from the batch (up to max_images).
+        """
+        n = min(self.max_images, batch["pixel_values"].shape[0])
+
+        panels = []
+        panel_labels = []
+
+        # --- condition images (subject / fill / …) ---
+        # batch["condition_latents"] holds raw pixels [B, num_conds, C, H, W]
+        if "condition_latents" in batch:
+            cond_imgs = batch["condition_latents"][:n]
+            for ci in range(cond_imgs.shape[1]):
+                c = cond_imgs[:, ci].float().clamp(-1., 1.)
+                panels.append(c)
+                cond_type = (
+                    batch["condition_types"][0][ci]
+                    if "condition_types" in batch
+                    else f"cond{ci}"
+                )
+                panel_labels.append(cond_type)
+
+        # --- ground-truth target (already pixels in [-1, 1]) ---
+        gt_pixels = batch["pixel_values"][:n].float().clamp(-1., 1.)
+        panels.append(gt_pixels)
+        panel_labels.append("ground-truth")
+
+        # --- model prediction: recover x0 from velocity, then decode ---
+        # Flux uses flow-matching: noisy = (1-σ)*x0 + σ*noise
+        # model predicts velocity v = noise - x0, so:
+        #   x0_pred = noisy_model_input - σ * model_pred
+        x0_pred_latent = noisy_model_input[:n] - sigmas[:n] * model_pred[:n]
+        pred_pixels = decode_latents(x0_pred_latent.float(), vae)  # [-1, 1]
+        panels.append(pred_pixels)
+        panel_labels.append("prediction")
+
+        # --- build grid: rows = samples, cols = panel types ---
+        rows = []
+        for i in range(n):
+            for p in panels:
+                img = p[i].cpu()                      # [C, H, W] in [-1, 1]
+                img = (img + 1.0) / 2.0               # to [0, 1]
+                rows.append(img)
+
+        ncols = len(panels)
+        grid = torchvision.utils.make_grid(rows, nrow=ncols, normalize=False, padding=4)
+        grid_np = (grid.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+
+        filename = f"gs-{global_step:06d}.png"
+        save_path = os.path.join(self.image_dir, filename)
+        Image.fromarray(grid_np).save(save_path)
+        logger.info(
+            f"[ImageLogger] Saved grid → {save_path}  "
+            f"(cols per row: {panel_labels})"
+        )
+
 
 def import_model_class_from_model_name_or_path(
     pretrained_model_name_or_path: str, revision: str, subfolder: str = "text_encoder"
@@ -93,7 +200,7 @@ def parse_args(input_args=None):
     
     parser.add_argument("--pretrained_condition_lora_dir",type=str,default="ckpt/Condition_LoRA",)
     parser.add_argument("--training_adapter",type=str,default="ckpt/FLUX.1-schnell-training-adapter",)
-    parser.add_argument("--checkpointing_steps",type=int,default=200,)
+    parser.add_argument("--checkpointing_steps",type=int,default=200,) ##################
     parser.add_argument("--resume_from_checkpoint",type=str,default=None,)
     parser.add_argument("--rank",type=int,default=4,help="The dimension of the LoRA rank.")
 
@@ -110,13 +217,13 @@ def parse_args(input_args=None):
     parser.add_argument("--resolution",type=int,default=512,)
     parser.add_argument("--train_batch_size", type=int, default=1)
     parser.add_argument("--num_train_epochs", type=int, default=None)
-    parser.add_argument("--max_train_steps", type=int, default=10000,)
+    parser.add_argument("--max_train_steps", type=int, default=30000,)
     parser.add_argument("--gradient_accumulation_steps",type=int,default=2)
 
     parser.add_argument("--learning_rate",type=float,default=1e-5) # Lưu ý: Khi finetune nên để LR nhỏ hơn lúc train từ đầu (VD: 1e-5)
     parser.add_argument("--scale_lr",action="store_true",default=False,)
     parser.add_argument("--lr_scheduler",type=str,default="cosine")
-    parser.add_argument("--lr_warmup_steps", type=int, default=300,)
+    parser.add_argument("--lr_warmup_steps", type=int, default=500,)
     parser.add_argument("--weighting_scheme",type=str,default="none")
     parser.add_argument("--dataloader_num_workers",type=int,default=4)
     parser.add_argument("--adam_beta1", type=float, default=0.9)
@@ -128,11 +235,16 @@ def parse_args(input_args=None):
     parser.add_argument("--enable_xformers_memory_efficient_attention", default=False)
     parser.add_argument("--pg", type=float, default=0.5)
     parser.add_argument("--pa", type=float, default=0.5)
+    parser.add_argument("--log_image_steps", type=int, default=200,
+                        help="Save sample images every N global steps (0 to disable).")
+    parser.add_argument("--log_max_images", type=int, default=4,
+                        help="Max number of images to log per logging step.")
 
     args = parser.parse_args()
     args.revision = None
     args.variant = None
     args.work_dir = os.path.join(args.work_dir,datetime.now().strftime('%y_%m_%d-%H:%M'))
+    os.makedirs(os.path.join(args.work_dir, "ckpt"), exist_ok=True)
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
@@ -142,6 +254,8 @@ def main(args):
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
+        log_with="tensorboard",          # <-- add this
+        project_dir=args.work_dir,       # <-- and this (tells it where to write)
     )
 
     logging.basicConfig(
@@ -162,6 +276,12 @@ def main(args):
 
     if accelerator.is_main_process:
         os.makedirs(args.work_dir, exist_ok=True)
+
+    image_logger = ImageLogger(
+        work_dir=args.work_dir,
+        log_every_n_steps=args.log_image_steps,
+        max_images=args.log_max_images,
+    ) if accelerator.is_main_process else None
 
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
@@ -305,8 +425,22 @@ def main(args):
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
+    def sanitize_config(cfg: dict) -> dict:
+        """Keep only TensorBoard-safe scalar types."""
+        safe = {}
+        for k, v in cfg.items():
+            if isinstance(v, (int, float, str, bool)):
+                safe[k] = v
+            elif isinstance(v, (list, tuple)):
+                safe[k] = str(v)   # convert list → string representation
+            elif v is None:
+                safe[k] = "None"
+            else:
+                safe[k] = str(v)
+        return safe
+
     if accelerator.is_main_process:
-        accelerator.init_trackers("UniCombine", config=vars(args))
+        accelerator.init_trackers("UniCombine", config=sanitize_config(vars(args)))
 
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
@@ -428,7 +562,13 @@ def main(args):
                     guidance = guidance.expand(latent_image.shape[0])
                 else:
                     guidance = None
-                    
+
+            # stash for ImageLogger (populated inside accumulate block below)
+            _log_model_pred = None
+            _log_noisy_input = noisy_model_input
+            _log_sigmas = sigmas
+            # Bug fix: stash raw pixel condition images BEFORE they are encoded+packed below
+            _log_condition_pixels = batch["condition_latents"].clone()
             with accelerator.accumulate(transformer):
                 model_pred = transformer(
                     model_config={},
@@ -452,6 +592,7 @@ def main(args):
                     width=noisy_model_input.shape[3] * vae_scale_factor,
                     vae_scale_factor=vae_scale_factor,
                 )
+                _log_model_pred = model_pred.detach()
                 
                 weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
                 target = noise - latent_image
@@ -464,9 +605,11 @@ def main(args):
 
                 accelerator.backward(loss)
 
+                _grad_norm = 0.0
                 if accelerator.sync_gradients:
                     params_to_clip = transformer.parameters()
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                    # Bug fix: capture grad_norm here (before step), not again in the log dict
+                    _grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -474,14 +617,38 @@ def main(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+
+                # Bug fix: log once per optimizer step (inside sync_gradients), using
+                # the grad_norm captured before optimizer.step() above.
+                logs = {
+                    "train/loss": loss.detach().item(),
+                    "train/lr": lr_scheduler.get_last_lr()[0],
+                    "train/epoch": epoch,
+                    "train/grad_norm": _grad_norm,
+                }
+                progress_bar.set_postfix(**logs)
+                accelerator.log(logs, step=global_step)
+
                 if accelerator.is_main_process:
                     if global_step % args.checkpointing_steps == 0:
-                        save_path = os.path.join(args.work_dir, f"checkpoint-{global_step}")
+                        save_path = os.path.join(args.work_dir, "ckpt", f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
-            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
+
+                    # --- ImageLogger: save decoded sample grid ---
+                    if image_logger is not None and image_logger.should_log(global_step):
+                        if _log_model_pred is not None:
+                            # Bug fix: pass the raw pixel conditions (stashed before encoding)
+                            log_batch = {**batch, "condition_latents": _log_condition_pixels}
+                            image_logger.log(
+                                global_step=global_step,
+                                batch=log_batch,
+                                vae=vae,
+                                weight_dtype=weight_dtype,
+                                model_pred=_log_model_pred,
+                                noisy_model_input=_log_noisy_input,
+                                sigmas=_log_sigmas,
+                            )
 
             if global_step >= args.max_train_steps:
                 break

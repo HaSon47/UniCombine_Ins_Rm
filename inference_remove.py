@@ -67,32 +67,19 @@ def get_inputs(test_dir, turn, root_path="/mnt/disk1/aiotlab/hachi/data/OBJ_INS_
         img_path = os.path.join(img_test_path, file.replace(".json", ".png"))
         ## get prompt
         class_name = anno_class["class"]
-        prompt = f"add one more {class_name} ensuring intra-category coherence, matching the morphology, scale, and visual style of existing {class_name}s"
+        prompt = f"remove a single instance of {class_name} from the scene, preserving the position, appearance, and count of all remaining {class_name}s, do not introduce any additional {class_name}, and inpaint the region to blend naturally with nearby content"
         ## get location bbox
         loc_bbox_path = os.path.join(anno_bbox_test_path, file)
         with open(loc_bbox_path, "r") as f:
             anno_loc = json.load(f)
-        loc_bbox = anno_loc["pred_box"][0]
+        loc_bbox = anno_loc["removal_box"][0]
 
-        # get subject
-        anno_folder_path = os.path.join(root_path, "test", img_folder, f"annotation.json")
-        exam_mask_path = os.path.join(root_path, "test", img_folder, f"mask_{turn_i+1}.png")
-        if not os.path.exists(anno_folder_path):
-            anno_folder_path = os.path.join(root_path, "val", img_folder, f"annotation.json")
-            exam_mask_path = os.path.join(root_path, "val", img_folder, f"mask_{turn_i+1}.png")
-        with open(anno_folder_path, 'r') as f:
-            anno = json.load(f)
-        if len(anno["inpainted_bboxes"]) <= turn_i:
-            continue
-        exam_bbox = anno["inpainted_bboxes"][turn_i]
         
         inputs.append([
             img_folder,
             prompt,
             img_path,
             loc_bbox,
-            exam_bbox,
-            exam_mask_path
         ])
     return inputs
 
@@ -108,7 +95,7 @@ def get_background(bg_path, loc_bbox):
     x1, y1, x2, y2 = loc_bbox
 
     # Kích thước hình vuông cần crop
-    crop_size = min(256, min(img_w, img_h))
+    crop_size = min(512, min(img_w, img_h))
 
     # Lấy tâm của loc_bbox
     cx = (x1 + x2) / 2
@@ -171,43 +158,11 @@ def get_background(bg_path, loc_bbox):
 
 from PIL import Image
 
-def get_conditions(img_path, loc_bbox, exam_bbox, exam_mask_path, exam_size, use_mask=False, padding=255):
+def get_conditions(img_path, loc_bbox):
     conditions = []
     
     # subject
-    if use_mask:
-        # Load image and mask
-        img = Image.open(img_path).convert("RGB")
-        mask = Image.open(exam_mask_path).convert("L")
-        
-        # Đảm bảo mask có cùng kích thước với ảnh gốc (nếu cần)
-        if img.size != mask.size:
-            mask = mask.resize(img.size, Image.Resampling.LANCZOS)
-            
-        # apply mask to img_path & fill around with white
-        white_bg = Image.new("RGB", img.size, (padding, padding, padding))
-        masked_img = Image.composite(img, white_bg, mask)
-        
-        # Crop lấy vùng subject
-        subject = masked_img.crop(exam_bbox)
-        
-        # paste to square then resize
-        sub_w, sub_h = subject.size
-        max_dim = max(sub_w, sub_h)
-        # Tạo khung vuông nền trắng để đồng bộ với background của subject
-        square = Image.new("RGB", (max_dim, max_dim), (padding, padding, padding))
-        square.paste(subject, ((max_dim - sub_w) // 2, (max_dim - sub_h) // 2))
-        
-        subject = square.resize((exam_size, exam_size), Image.Resampling.LANCZOS)
-    else:
-        subject = Image.open(img_path).convert("RGB").crop(exam_bbox)
-        sub_w, sub_h = subject.size
-        max_dim = max(sub_w, sub_h)
-        square = Image.new("RGB", (max_dim, max_dim), (127, 127, 127))
-        square.paste(subject, ((max_dim - sub_w) // 2, (max_dim - sub_h) // 2))
-
-        subject = square.resize((exam_size, exam_size), Image.Resampling.LANCZOS)
-        
+    subject= Image.new("RGB", (512, 512), (127, 127, 127))        
     conditions.append(Condition("subject", raw_img=convert_image(subject))) 
     # fill
     original_img, fill, new_loc_bbox, crop_box = get_background(img_path, loc_bbox)
@@ -274,8 +229,8 @@ def inference(args):
     os.makedirs(os.path.join(output_dir, "mask"), exist_ok=True)
     # infer
     inputs = get_inputs(args.test_dir, args.turn)
-    for img_name, prompt, img_path, loc_bbox, exam_bbox, exam_mask_path in tqdm(inputs):
-        conditions, new_loc_bbox, mask, original_img, crop_box = get_conditions(img_path, loc_bbox, exam_bbox, exam_mask_path, args.exam_size, use_mask=args.use_mask, padding=args.padding)
+    for img_name, prompt, img_path, loc_bbox in tqdm(inputs):
+        conditions, new_loc_bbox, mask, original_img, crop_box = get_conditions(img_path, loc_bbox)
         result_img = pipe(
             prompt=prompt,
             conditions=conditions,

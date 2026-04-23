@@ -3,40 +3,21 @@ import json
 import random
 from accelerate.logging import get_logger
 import torch
-import torchvision.transforms as transforms
 logger = get_logger(__name__)
 from PIL import Image
 from .condition import Condition
 from diffusers.image_processor import VaeImageProcessor
 from datasets import Dataset
-from typing import List
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
 
-
-geom_transforms = transforms.Compose([
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomApply([
-        transforms.RandomRotation(degrees=15, fill=127)
-    ], p=0.5),
-    transforms.RandomPerspective(distortion_scale=0.2, p=0.5, fill=127)
-])
-
-color_transforms = transforms.ColorJitter(
-    brightness=0.15, 
-    contrast=0.15, 
-    saturation=0.15, 
-    hue=0.05
-)
-
-
 def get_dataset(args):
     root_dir = args.dataset_name[0] if isinstance(args.dataset_name, list) else args.dataset_name
 
     image_dir = os.path.join(root_dir, 'inpaint/train')
-    inpaint_dir = os.path.join(root_dir, 'inpaint/train')
+    inpaint_dir = os.path.join(root_dir, 'images/train')
     box_dir = os.path.join(root_dir, 'box_json/train')
 
     filenames = [os.path.splitext(f)[0] for f in os.listdir(image_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
@@ -89,22 +70,6 @@ def crop_and_adjust_bbox(input_image, gt_image, x1, y1, x2, y2, resolution):
     return input_image, gt_image, (new_x1, new_y1, new_x2, new_y2), scaled_bbox
 
 
-def extract_and_augment_subject(gt_image, bbox, pg, pa):
-    """Cắt subject, padding vuông nền xám, rồi augment."""
-    x1, y1, x2, y2 = bbox
-    subject = gt_image.crop((x1, y1, x2, y2))
-
-    sub_w, sub_h = subject.size
-    max_dim = max(sub_w, sub_h)
-    square = Image.new("RGB", (max_dim, max_dim), (127, 127, 127))
-    square.paste(subject, ((max_dim - sub_w) // 2, (max_dim - sub_h) // 2))
-
-    square = geom_transforms(square)
-    if random.random() < pa:
-        square = color_transforms(square)
-
-    return square
-
 
 def preprocess_conditions(conditions, image_processor, resolution):
     """Chuyển danh sách Condition thành tensor stack và danh sách condition_type."""
@@ -135,10 +100,7 @@ def preprocess(examples, image_processor, args):
         # Ground truth tensor
         pixel_values.append(image_processor.preprocess(gt_image, width=args.resolution, height=args.resolution).squeeze(0))
 
-        # Subject extraction + augmentation
-        pg = getattr(args, 'pg', 0.5)
-        pa = getattr(args, 'pa', 0.5)
-        subject_image = extract_and_augment_subject(gt_image, local_bbox, pg, pa)
+        subject_image = Image.new("RGB", (512, 512), (127, 127, 127))
 
         # Conditions
         conditions = []
@@ -155,8 +117,8 @@ def preprocess(examples, image_processor, args):
         condition_types.append(cond_types)
         bboxes.append(scaled_bbox)
         descriptions.append({
-            "description_0": f"add one more {class_name} ensuring intra-category coherence, matching the morphology, scale, and visual style of existing {class_name}s",
-            "item": class_name
+            "description_0": f"remove a single instance of {class_name} from the scene, preserving the position, appearance, and count of all remaining {class_name}s, do not introduce any additional {class_name}, and inpaint the region to blend naturally with nearby content",
+            "item": "empty background"
         })
 
     examples["pixel_values"] = pixel_values
@@ -275,7 +237,7 @@ if __name__ == "__main__":
     # 1. Khởi tạo Args giả lập để test
     class DummyArgs:
         def __init__(self):
-            self.dataset_name = "/mnt/disk2/aiotlab/hachi/Data/ObjectStitch_V2" 
+            self.dataset_name = "/home/user01/aiotlab/hachi/data/ObjectStitch_V2" 
             self.resolution = 512
             self.condition_types = ["subject", "fill"]
             self.pg = 0.5
@@ -307,8 +269,8 @@ if __name__ == "__main__":
         print(f"Bắt đầu xuất {num_samples_to_check} ảnh debug...")
         
         for i in range(num_samples_to_check):
-            visualize_input(processed_dataset, index=i, save_dir="debug_outputs")
+            visualize_input(processed_dataset, index=i, save_dir="debug_outputs_rm")
             
-        print("Hoàn tất! Vui lòng kiểm tra thư mục 'debug_outputs'.")
+        print("Hoàn tất! Vui lòng kiểm tra thư mục 'debug_outputs_rm'.")
     else:
         print("Không tìm thấy dữ liệu hợp lệ. Hãy kiểm tra lại đường dẫn dataset và cấu trúc thư mục (images, inpaint, box_json).")
