@@ -6,7 +6,7 @@ sys.path.append(os.path.abspath(os.path.join(current_dir, '..')))
 import torch
 from src.condition import Condition
 from PIL import Image, ImageDraw
-from src.UniCombineTransformer2DModel import UniCombineTransformer2DModel
+from src.UniCombineTransformer2DModel_sub_att_fill import UniCombineTransformer2DModel
 from src.UniCombinePipeline import UniCombinePipeline
 from accelerate.utils import set_seed
 import json
@@ -23,6 +23,7 @@ def parse_args(input_args=None):
     parser.add_argument("--transformer",type=str,default="ckpt/FLUX.1-schnell/transformer",)
     parser.add_argument("--condition_types", type=str, nargs='+', default=["fill","subject"],)
     parser.add_argument("--condition_lora_dir",type=str,default="ckpt/Condition_LoRA",)
+    parser.add_argument("--pretrained_subject_condition_lora_dir", type=str, default="/mnt/disk1/aiotlab/hachi/code/UniCombine_Ins_Rm/output/train_condition/H1_tuneSubject/ckpt/checkpoint-18600")
     parser.add_argument("--denoising_lora_dir",type=str,default="ckpt/Denoising_LoRA",)
     parser.add_argument("--denoising_lora_name",type=str,default="subject_fill_union",)
     parser.add_argument("--denoising_lora_weight",type=float,default=1.0,)
@@ -34,7 +35,8 @@ def parse_args(input_args=None):
     parser.add_argument("--version",type=str,default="training-based",choices=["training-based","training-free"])
     parser.add_argument("--turn",type=int,default=1,)
     parser.add_argument("--use_mask", action="store_true")
-    parser.add_argument("--padding",type=int,default=255,)
+    parser.add_argument("--mask_padding_value",type=int,default=255,)
+    parser.add_argument("--padding", action="store_true")
     args = parser.parse_args()
     args.revision = None
     args.variant = None
@@ -171,7 +173,7 @@ def get_background(bg_path, loc_bbox):
 
 from PIL import Image
 
-def get_conditions(img_path, loc_bbox, exam_bbox, exam_mask_path, exam_size, use_mask=False, padding=255):
+def get_conditions(img_path, loc_bbox, exam_bbox, exam_mask_path, exam_size, use_mask=False, mask_padding_value=255, padding=False):
     conditions = []
     
     # subject
@@ -185,7 +187,7 @@ def get_conditions(img_path, loc_bbox, exam_bbox, exam_mask_path, exam_size, use
             mask = mask.resize(img.size, Image.Resampling.LANCZOS)
             
         # apply mask to img_path & fill around with white
-        white_bg = Image.new("RGB", img.size, (padding, padding, padding))
+        white_bg = Image.new("RGB", img.size, (mask_padding_value, mask_padding_value, mask_padding_value))
         masked_img = Image.composite(img, white_bg, mask)
         
         # Crop lấy vùng subject
@@ -195,18 +197,22 @@ def get_conditions(img_path, loc_bbox, exam_bbox, exam_mask_path, exam_size, use
         sub_w, sub_h = subject.size
         max_dim = max(sub_w, sub_h)
         # Tạo khung vuông nền trắng để đồng bộ với background của subject
-        square = Image.new("RGB", (max_dim, max_dim), (padding, padding, padding))
+        square = Image.new("RGB", (max_dim, max_dim), (mask_padding_value, mask_padding_value, mask_padding_value))
         square.paste(subject, ((max_dim - sub_w) // 2, (max_dim - sub_h) // 2))
         
         subject = square.resize((exam_size, exam_size), Image.Resampling.LANCZOS)
     else:
-        subject = Image.open(img_path).convert("RGB").crop(exam_bbox)
-        sub_w, sub_h = subject.size
-        max_dim = max(sub_w, sub_h)
-        square = Image.new("RGB", (max_dim, max_dim), (127, 127, 127))
-        square.paste(subject, ((max_dim - sub_w) // 2, (max_dim - sub_h) // 2))
+        if padding:
+            subject = Image.open(img_path).convert("RGB").crop(exam_bbox)
+            sub_w, sub_h = subject.size
+            max_dim = max(sub_w, sub_h)
+            square = Image.new("RGB", (max_dim, max_dim), (127, 127, 127))
+            square.paste(subject, ((max_dim - sub_w) // 2, (max_dim - sub_h) // 2))
 
-        subject = square.resize((exam_size, exam_size), Image.Resampling.LANCZOS)
+            subject = square.resize((exam_size, exam_size), Image.Resampling.LANCZOS)
+        else:
+            subject = Image.open(img_path).convert("RGB").crop(exam_bbox)
+            subject = subject.resize((exam_size, exam_size), Image.Resampling.LANCZOS)
         
     conditions.append(Condition("subject", raw_img=convert_image(subject))) 
     # fill
@@ -251,7 +257,14 @@ def inference(args):
     ).to(device = device, dtype=weight_dtype)
 
     for condition_type in args.condition_types:
-        transformer.load_lora_adapter(f"{args.condition_lora_dir}/{condition_type}.safetensors", adapter_name=condition_type)
+        if condition_type == 'subject':
+            if args.pretrained_subject_condition_lora_dir != args.condition_lora_dir:
+                print("------- use Condition Subject LoRA sub att fill--------")
+                transformer.load_lora_adapter(f"{args.pretrained_subject_condition_lora_dir}/{condition_type}/pytorch_lora_weights.safetensors", adapter_name=condition_type)
+            else:
+                transformer.load_lora_adapter(f"{args.condition_lora_dir}/{condition_type}.safetensors", adapter_name=condition_type)
+        else:
+            transformer.load_lora_adapter(f"{args.condition_lora_dir}/{condition_type}.safetensors", adapter_name=condition_type)
 
     pipe = UniCombinePipeline.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -275,7 +288,7 @@ def inference(args):
     # infer
     inputs = get_inputs(args.test_dir, args.turn)
     for img_name, prompt, img_path, loc_bbox, exam_bbox, exam_mask_path in tqdm(inputs):
-        conditions, new_loc_bbox, mask, original_img, crop_box = get_conditions(img_path, loc_bbox, exam_bbox, exam_mask_path, args.exam_size, use_mask=args.use_mask, padding=args.padding)
+        conditions, new_loc_bbox, mask, original_img, crop_box = get_conditions(img_path, loc_bbox, exam_bbox, exam_mask_path, args.exam_size, use_mask=args.use_mask, mask_padding_value=args.mask_padding_value, padding=args.padding)
         result_img = pipe(
             prompt=prompt,
             conditions=conditions,
